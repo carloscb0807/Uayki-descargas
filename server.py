@@ -3,6 +3,7 @@ import re
 import threading
 import uuid
 import time
+import random
 from pathlib import Path
 from flask import Flask, request, jsonify, send_file, render_template, after_this_request
 from flask_cors import CORS
@@ -16,10 +17,33 @@ DOWNLOAD_DIR.mkdir(exist_ok=True)
 
 jobs = {}
 
-# Simular que la solicitud viene desde Perú/Latinoamérica
-GEO_BYPASS_OPTS = {
+# User agents de navegadores reales actualizados
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+]
+
+BASE_OPTS = {
     "geo_bypass": True,
-    "geo_bypass_country": "PE",  # Peru
+    "geo_bypass_country": "PE",
+    "nocheckcertificate": True,
+    "user_agent": random.choice(USER_AGENTS),
+    # Simular cliente Android — YouTube no pide bot check en este cliente
+    "extractor_args": {
+        "youtube": {
+            "player_client": ["android", "web"],
+            "player_skip": ["webpage", "configs"],
+        }
+    },
+    "http_headers": {
+        "Accept-Language": "es-PE,es;q=0.9,en;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    },
+    "sleep_interval": 2,
+    "max_sleep_interval": 5,
 }
 
 def sanitize_filename(name):
@@ -59,7 +83,8 @@ def do_download(job_id, url, fmt, quality):
         out_template = str(DOWNLOAD_DIR / "%(title)s.%(ext)s")
 
         base_opts = {
-            **GEO_BYPASS_OPTS,
+            **BASE_OPTS,
+            "user_agent": random.choice(USER_AGENTS),  # rotar por descarga
             "progress_hooks": [lambda d: progress_hook(d, job_id)],
             "quiet": True,
         }
@@ -120,11 +145,15 @@ def do_download(job_id, url, fmt, quality):
 
     except Exception as e:
         error_msg = str(e)
-        # Si sigue con error de país, intentar con otro país de la región
-        if "not available in your country" in error_msg or "geo" in error_msg.lower():
+        if "Sign in" in error_msg or "bot" in error_msg.lower():
             jobs[job_id] = {
                 "status": "error",
-                "message": "Este video tiene restricción geográfica muy estricta y no puede descargarse desde el servidor. Prueba con otro video."
+                "message": "YouTube bloqueó la solicitud. Intenta de nuevo en unos minutos."
+            }
+        elif "not available in your country" in error_msg:
+            jobs[job_id] = {
+                "status": "error",
+                "message": "Este video tiene restricción geográfica estricta."
             }
         else:
             jobs[job_id] = {"status": "error", "message": error_msg}
@@ -142,7 +171,7 @@ def get_info():
     if not url:
         return jsonify({"error": "URL requerida"}), 400
     try:
-        opts = {"quiet": True, "skip_download": True, **GEO_BYPASS_OPTS}
+        opts = {**BASE_OPTS, "quiet": True, "skip_download": True}
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
         return jsonify({
