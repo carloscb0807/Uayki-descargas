@@ -16,22 +16,26 @@ DOWNLOAD_DIR.mkdir(exist_ok=True)
 
 jobs = {}
 
+# Simular que la solicitud viene desde Perú/Latinoamérica
+GEO_BYPASS_OPTS = {
+    "geo_bypass": True,
+    "geo_bypass_country": "PE",  # Peru
+}
+
 def sanitize_filename(name):
     return re.sub(r'[\\/*?:"<>|]', "_", name)
 
 def cleanup_old_files():
-    """Elimina archivos de más de 10 minutos"""
     while True:
-        time.sleep(300)  # cada 5 minutos
+        time.sleep(300)
         now = time.time()
         for f in DOWNLOAD_DIR.iterdir():
             try:
-                if now - f.stat().st_mtime > 600:  # 10 minutos
+                if now - f.stat().st_mtime > 600:
                     f.unlink()
             except:
                 pass
 
-# Hilo de limpieza automática
 threading.Thread(target=cleanup_old_files, daemon=True).start()
 
 def progress_hook(d, job_id):
@@ -54,8 +58,15 @@ def do_download(job_id, url, fmt, quality):
     try:
         out_template = str(DOWNLOAD_DIR / "%(title)s.%(ext)s")
 
+        base_opts = {
+            **GEO_BYPASS_OPTS,
+            "progress_hooks": [lambda d: progress_hook(d, job_id)],
+            "quiet": True,
+        }
+
         if fmt == "mp3":
             ydl_opts = {
+                **base_opts,
                 "format": "bestaudio/best",
                 "outtmpl": out_template,
                 "postprocessors": [{
@@ -63,8 +74,6 @@ def do_download(job_id, url, fmt, quality):
                     "preferredcodec": "mp3",
                     "preferredquality": "192",
                 }],
-                "progress_hooks": [lambda d: progress_hook(d, job_id)],
-                "quiet": True,
             }
         else:
             if quality == "max":
@@ -73,6 +82,7 @@ def do_download(job_id, url, fmt, quality):
                 fmt_str = "bestvideo[height<={}]+bestaudio/best[height<={}]".format(quality, quality)
 
             ydl_opts = {
+                **base_opts,
                 "format": fmt_str,
                 "outtmpl": out_template,
                 "merge_output_format": "mp4",
@@ -80,8 +90,6 @@ def do_download(job_id, url, fmt, quality):
                 "postprocessor_args": {
                     "ffmpeg": ["-vcodec", "libx264", "-acodec", "aac", "-crf", "23", "-preset", "fast"]
                 },
-                "progress_hooks": [lambda d: progress_hook(d, job_id)],
-                "quiet": True,
             }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -111,7 +119,15 @@ def do_download(job_id, url, fmt, quality):
                 jobs[job_id] = {"status": "error", "message": "No se encontro el archivo descargado."}
 
     except Exception as e:
-        jobs[job_id] = {"status": "error", "message": str(e)}
+        error_msg = str(e)
+        # Si sigue con error de país, intentar con otro país de la región
+        if "not available in your country" in error_msg or "geo" in error_msg.lower():
+            jobs[job_id] = {
+                "status": "error",
+                "message": "Este video tiene restricción geográfica muy estricta y no puede descargarse desde el servidor. Prueba con otro video."
+            }
+        else:
+            jobs[job_id] = {"status": "error", "message": error_msg}
 
 
 @app.route("/")
@@ -126,7 +142,8 @@ def get_info():
     if not url:
         return jsonify({"error": "URL requerida"}), 400
     try:
-        with yt_dlp.YoutubeDL({"quiet": True, "skip_download": True}) as ydl:
+        opts = {"quiet": True, "skip_download": True, **GEO_BYPASS_OPTS}
+        with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
         return jsonify({
             "title": info.get("title"),
@@ -172,14 +189,12 @@ def serve_file(filename):
     if not path.exists():
         return jsonify({"error": "Archivo no encontrado"}), 404
 
-    # Eliminar el archivo después de enviarlo al usuario
     @after_this_request
     def delete_file(response):
         def remove():
             time.sleep(5)
             try:
                 path.unlink()
-                # Limpiar el job también
                 for jid, job in list(jobs.items()):
                     if job.get("filename") == filename:
                         del jobs[jid]
